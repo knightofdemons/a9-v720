@@ -8,7 +8,7 @@ import cmd_udp
 from datetime import datetime
 from v720_http import v720_http
 
-HTTP_PORT = 720
+HTTP_PORT = 80
 
 FSM_NONE = '-'
 FSM_HEARBEAT = 'hearbeat'
@@ -46,9 +46,9 @@ def fsm_set_nat(conn: socket, _: bytes):
         'code': cmd_udp.CODE_S2D_NAT_REQ,
         'cliTarget': FSM['data']['cli_tg'],
         'cliToken': FSM['data']['cli_tkn'],
-        'cliIp': '192.168.1.99',  # it will send there to achive it from `cliNatIp:cliNatPort`
+        'cliIp': '10.42.0.1',  # it will send there to achive it from `cliNatIp:cliNatPort`
         'cliPort': 53221,
-        'cliNatIp': '192.168.1.99',
+        'cliNatIp': '10.42.0.1',
         'cliNatPort': 41234
     }
     print(f'[TCP] Send status req: {resp}')
@@ -64,7 +64,7 @@ def fsm_get_status(conn: socket, to):
 
 def fsm_udp_req(conn: socket, to):
     resp = {'code': cmd_udp.CODE_S2C_UDP_RSP,
-            'ip': "192.168.1.99", "port": 53221}
+            'ip': "10.42.0.1", "port": 53221}
     print(f'[UDP] Send UDP response: {resp}')
     conn.sendto(prot_json_udp(json=resp).req(), to)
 
@@ -156,7 +156,7 @@ def tcp_thread(arg):
     try:
         _socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        _socket.bind(('192.168.1.99', 6123))
+        _socket.bind(('10.42.0.1', 6123))
         _socket.listen()
 
         conn, addr = _socket.accept()
@@ -225,7 +225,7 @@ def srv_udp_thread(arg):
     global send_online
     _socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     _socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    _socket.bind(('192.168.1.99', 6123))
+    _socket.bind(('10.42.0.1', 6123))
     rmt = None
     probe = True
     while True:

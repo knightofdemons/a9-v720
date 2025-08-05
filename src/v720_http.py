@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 from datetime import datetime
 import email.utils
@@ -15,7 +16,7 @@ from netcl_udp import netcl_udp
 from a9_live import PORT, WAV_HDR
 
 TCP_PORT = PORT
-HTTP_PORT = 720
+HTTP_PORT = 80
 
 
 class v720_http(log, SimpleHTTPRequestHandler):
@@ -229,14 +230,8 @@ class v720_http(log, SimpleHTTPRequestHandler):
         ]
         self.info(f'POST {self.path}')
         if self.path.startswith('/app/api/ApiSysDevicesBatch/registerDevices'):
-            last_three_digits = self.connection.getpeername()[0][-3:]
-
-            if last_three_digits == "103":
-                ret = {"code": 200, "message": "OK", "data": "cam103"}
-            elif last_three_digits == "104":
-                ret = {"code": 200, "message": "OK", "data": "cam104"}
-            elif last_three_digits == "105":
-                ret = {"code": 200, "message": "OK", "data": "cam105"}
+            ret = {"code": 200, "message": "OK",
+                   "data": f"0800c00{random.randint(0,99999):05d}"}
         elif self.path.startswith('/app/api/ApiSysDevicesBatch/confirm'):
             ret = {"code": 200, "message": "OK", "data": None}
         elif self.path.startswith('/app/api/ApiSysDevices/a9bindingAppDevice'):
@@ -258,7 +253,7 @@ class v720_http(log, SimpleHTTPRequestHandler):
                     "isBind": "8",
                     "domain": "v720.naxclow.com",
                     "updateUrl": None,
-                    "host": netcl_udp.get_ip(list(gws['default'].values())[0][0] if len(gws['default']) > 0 else '192.168.1.99', 80),
+                    "host": netcl_udp.get_ip(list(gws['default'].values())[0][0] if len(gws['default']) > 0 else '10.42.0.1', 80),
                     "currTime": f'{int(datetime.timestamp(datetime.now()))}',
                     "pwd": "deadbeef",
                     "version": None
