@@ -3,6 +3,7 @@
   "http_port": 80,
   "tcp_port": 6123,
   "udp_port": 6124,
+  "web_port": 8080,
   "domain": "v720.naxclow.com",
   "is_bind": "1",
   "default_status": 200,

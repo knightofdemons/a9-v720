@@ -5,11 +5,14 @@ use anyhow::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    // Network configuration
+    // Network configuration for camera communication
     pub server_ip: String,
-    pub http_port: u16,
-    pub tcp_port: u16,
-    pub udp_port: u16,
+    pub http_port: u16,  // Port for camera HTTP requests (default: 80)
+    pub tcp_port: u16,   // Port for camera TCP connections (default: 6123)
+    pub udp_port: u16,   // Port for camera UDP connections (default: 6124)
+    
+    // Web management interface
+    pub web_port: u16,   // Port for browser web interface (default: 8080)
 
     // Domain configuration
     pub domain: String,
@@ -26,9 +29,10 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             server_ip: "192.168.1.200".to_string(),
-            http_port: 80,
-            tcp_port: 6123,
-            udp_port: 6124,
+            http_port: 80,      // Camera HTTP requests
+            tcp_port: 6123,     // Camera TCP connections  
+            udp_port: 6124,     // Camera UDP connections
+            web_port: 8080,     // Browser web interface
             domain: "v720.naxclow.com".to_string(),
             is_bind: "1".to_string(),
             default_status: 200,
@@ -85,6 +89,10 @@ impl AppConfig {
     #[allow(dead_code)]
     pub fn get_udp_bind_addr(&self) -> String {
         format!("0.0.0.0:{}", self.server_config.udp_port)
+    }
+
+    pub fn get_web_bind_addr(&self) -> String {
+        format!("0.0.0.0:{}", self.server_config.web_port)
     }
 
     #[allow(dead_code)]

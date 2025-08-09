@@ -23,6 +23,7 @@ use bytes::Bytes;
 mod protocol;
 mod camera_session;
 mod config;
+mod web;
 use protocol::{ProtocolMessage, parse_protocol_message, serialize_registration_response, CODE_C2S_REGISTER};
 use camera_session::CameraSession;
 use config::AppConfig;
@@ -124,6 +125,21 @@ async fn main() -> Result<()> {
     let tcp_config = config.clone();
     tokio::spawn(async move {
         start_tcp_server(tcp_sessions, tcp_config).await;
+    });
+
+    // Start web management server
+    let web_sessions = camera_sessions.clone();
+    let web_config = config.clone();
+    tokio::spawn(async move {
+        info!("🌐 Starting web server task...");
+        start_web_server(web_sessions, web_config).await;
+        info!("🌐 Web server task completed");
+    });
+
+    // Start periodic session cleanup task
+    let cleanup_sessions = camera_sessions.clone();
+    tokio::spawn(async move {
+        session_cleanup_task(cleanup_sessions).await;
     });
 
     // UDP servers removed - real protocol uses only HTTP + TCP with keepalives
@@ -267,6 +283,19 @@ async fn handle_tcp_connection(
         match socket.read(&mut buffer).await {
             Ok(0) => {
                 info!("TCP connection closed from {}", addr);
+                
+                // Clean up the session for this disconnected camera
+                {
+                    let mut sessions = camera_sessions.write().await;
+                    // Find and update session status for cameras from this IP
+                    for (device_id, session) in sessions.iter_mut() {
+                        if session.ip_address == addr.ip() {
+                            session.protocol_state = crate::camera_session::ProtocolState::Disconnected;
+                            info!("🔌 Marked camera {} ({}) as disconnected", device_id, addr.ip());
+                            break;
+                        }
+                    }
+                }
                 break;
             }
             Ok(n) => {
@@ -277,6 +306,19 @@ async fn handle_tcp_connection(
                 if n == 20 {
                     // This is likely a keepalive message (20 bytes as seen in capture)
                     info!("🔄 Received keepalive from camera {}", addr);
+                    
+                    // Update the session's last_seen timestamp for any camera from this IP
+                    {
+                        let mut sessions = camera_sessions.write().await;
+                        // Find session by IP address and update last_seen
+                        for (device_id, session) in sessions.iter_mut() {
+                            if session.ip_address == addr.ip() {
+                                session.last_seen = chrono::Utc::now();
+                                info!("📋 Updated last_seen for camera: {} ({})", device_id, addr.ip());
+                                break;
+                            }
+                        }
+                    }
                     
                     // Send keepalive response (20 bytes with pattern from working Python server)
                     let response = [
@@ -338,11 +380,21 @@ async fn handle_camera_registration(
     info!("📥 Processing camera registration from: {}", addr);
     info!("📥 Registration message: {}", serde_json::to_string(&message).unwrap_or_default());
     
-    let session_id = format!("{}", addr.ip());
+    // Use the device ID from the message as primary session key, fallback to IP if not provided
+    let device_id = message.uid.clone().unwrap_or_else(|| format!("camera_{}", addr.ip()));
+    let session_id = device_id.clone();
+    
+    info!("🏷️  Registering camera with ID: {} from IP: {}", session_id, addr.ip());
+    
     {
         let mut sessions = camera_sessions.write().await;
-        let session = CameraSession::new(session_id.clone(), addr.ip());
-        sessions.insert(session_id, session);
+        let mut session = CameraSession::new(device_id.clone(), addr.ip());
+        session.protocol_state = crate::camera_session::ProtocolState::Registered;
+        session.ip_address = addr.ip();
+        sessions.insert(session_id.clone(), session);
+        
+        info!("📋 Total cameras registered: {}", sessions.len());
+        info!("📋 Active cameras: {:?}", sessions.keys().collect::<Vec<_>>());
     } // Drop the lock here
     
     // Send registration response (code 101) - minimal response as per fake-server.md
@@ -379,3 +431,63 @@ async fn handle_camera_registration(
 }
 
 // All NAT/UDP/probe functions removed - real protocol uses simple TCP keepalive
+
+async fn start_web_server(camera_sessions: CameraSessions, config: AppConfig) {
+    info!("🌐 Creating web server state...");
+    let web_state = web::WebServerState {
+        camera_sessions,
+        config: config.clone(),
+    };
+    
+    info!("🌐 Creating web router...");
+    let app = web::create_web_router(web_state);
+    
+    info!("🌐 Getting web bind address...");
+    let addr = config.get_web_bind_addr();
+    
+    info!("🌐 Web management server starting on {}", addr);
+    info!("📋 Access camera management at: http://{}", addr.replace("0.0.0.0", "localhost"));
+    
+    info!("🌐 Binding to address: {}", addr);
+    match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => {
+            info!("🌐 Web server bound successfully, starting axum serve...");
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("🌐 Web server failed: {}", e);
+            }
+        }
+        Err(e) => {
+            error!("🌐 Failed to bind web server to {}: {}", addr, e);
+        }
+    }
+    info!("🌐 Web server function ending");
+}
+
+async fn session_cleanup_task(camera_sessions: CameraSessions) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Run every minute
+    
+    loop {
+        interval.tick().await;
+        
+        let mut sessions_to_remove = Vec::new();
+        {
+            let sessions = camera_sessions.read().await;
+            for (device_id, session) in sessions.iter() {
+                // Remove sessions that haven't been seen for more than 10 minutes
+                if !session.is_active() {
+                    sessions_to_remove.push(device_id.clone());
+                }
+            }
+        }
+        
+        if !sessions_to_remove.is_empty() {
+            let mut sessions = camera_sessions.write().await;
+            for device_id in sessions_to_remove {
+                if let Some(removed_session) = sessions.remove(&device_id) {
+                    info!("🧹 Cleaned up inactive camera session: {} ({})", device_id, removed_session.ip_address);
+                }
+            }
+            info!("📊 Active camera sessions: {}", sessions.len());
+        }
+    }
+}

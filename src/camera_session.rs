@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::time::SystemTime;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -33,7 +33,7 @@ pub struct CameraSession {
     pub dev_nat_ip: Option<String>,
     pub dev_nat_port: Option<i32>,
     pub udp_port: Option<i32>,
-    pub last_seen: SystemTime,
+    pub last_seen: DateTime<Utc>,
 }
 
 impl CameraSession {
@@ -49,21 +49,23 @@ impl CameraSession {
             dev_nat_ip: None,
             dev_nat_port: None,
             udp_port: None,
-            last_seen: SystemTime::now(),
+            last_seen: Utc::now(),
         }
     }
 
     #[allow(dead_code)]
     pub fn update_last_seen(&mut self) {
-        self.last_seen = SystemTime::now();
+        self.last_seen = Utc::now();
     }
 
     #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
-        match self.last_seen.elapsed() {
-            Ok(duration) => duration.as_secs() < 300, // 5 minutes timeout
-            Err(_) => false,
-        }
+        let duration = Utc::now() - self.last_seen;
+        duration.num_seconds() < 300 // 5 minutes timeout
+    }
+
+    pub fn is_connected(&self) -> bool {
+        !matches!(self.protocol_state, ProtocolState::Disconnected) && self.is_active()
     }
 
     pub fn get_state_string(&self) -> &'static str {

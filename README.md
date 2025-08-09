@@ -6,15 +6,17 @@ A production-ready Rust implementation of the A9 V720 camera server protocol. Th
 
 ✅ **Camera Registration**: HTTP and TCP registration complete  
 ✅ **Persistent Connection**: Long-lived TCP connection with keepalive handling  
-✅ **Production Ready**: Systemd service with proper deployment  
-🔄 **Next Phase**: Command interface for snapshots and streaming  
+✅ **Web Management Interface**: Full-width camera dashboard with live status  
+✅ **Production Ready**: Systemd service with clean builds (0 warnings)  
+🔄 **Next Phase**: Investigate camera 192.168.1.104 connectivity issues  
 
 ## 🔧 Architecture
 
 The server implements a simplified, working protocol based on real traffic analysis:
 
 1. **HTTP Server (Port 80)**: Camera registration and server configuration
-2. **TCP Server (Port 6123)**: Persistent camera communication with keepalive handling
+2. **TCP Server (Port 6123)**: Persistent camera communication with keepalive handling  
+3. **Web Server (Port 1234)**: Camera management dashboard with live status and controls
 
 **Note**: UDP components were removed after traffic analysis revealed they are not used by real cameras.
 
@@ -35,6 +37,25 @@ Based on actual traffic capture and analysis, the working protocol is:
 6. Server responds with 20-byte keepalive responses
 
 **Critical Discovery**: Real cameras do not use NAT/UDP protocols - they maintain a simple persistent TCP connection with periodic keepalives.
+
+## 🌐 Web Management Interface
+
+Access the camera management dashboard at `http://YOUR_SERVER_IP:1234`:
+
+### Features:
+- **Full-width camera overview table** sorted by IP address
+- **Live status monitoring** (Connected/Disconnected) 
+- **Last seen timestamps** with auto-refresh (30s)
+- **Direct camera controls**: Snapshot and Live Stream buttons per camera
+- **Clean, responsive design** optimized for monitoring multiple cameras
+
+### Camera Information Displayed:
+- Camera ID (device identifier)
+- IP Address (sorted numerically)
+- Connection Status (Connected/Disconnected)
+- Last Seen (timestamp of last activity)
+- Protocol State (connection phase)
+- Action buttons (Snapshot/Stream per camera)
 
 ## 🚀 Installation & Deployment
 
@@ -76,21 +97,25 @@ sudo systemctl start a9-v720-server.service
 
 ```json
 {
-  "server_config": {
-    "server_ip": "192.168.1.200",
-    "domain": "v720.naxclow.com"
-  },
+  "server_ip": "192.168.1.200",
   "http_port": 80,
-  "tcp_port": 6123
+  "tcp_port": 6123,
+  "udp_port": 6124,
+  "web_port": 1234,
+  "domain": "v720.naxclow.com",
+  "is_bind": "1",
+  "default_status": 200,
+  "default_timeout": 30
 }
 ```
 
 ### Network Setup
 
 The server binds to:
-- **HTTP**: `0.0.0.0:80` (all interfaces)
-- **TCP**: `0.0.0.0:6123` (all interfaces)
-- **Camera IP**: Configure in `config.json` based on your network
+- **HTTP (cameras)**: `0.0.0.0:80` - Camera registration and configuration  
+- **TCP (cameras)**: `0.0.0.0:6123` - Persistent camera connections
+- **Web (browser)**: `0.0.0.0:1234` - Management dashboard (configurable via `web_port`)
+- **Server IP**: Configure in `config.json` based on your network
 
 ### DNS Requirements
 
