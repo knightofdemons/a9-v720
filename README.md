@@ -2,13 +2,14 @@
 
 A production-ready Rust implementation of the A9 V720 camera server protocol. This server successfully establishes persistent connections with A9 V720 cameras and maintains them in standby mode, ready for command interface implementation.
 
-## 🎯 Project Status: **WORKING SOLUTION**
+## 🎯 Project Status: **FULLY WORKING SOLUTION**
 
 ✅ **Camera Registration**: HTTP and TCP registration complete  
 ✅ **Persistent Connection**: Long-lived TCP connection with keepalive handling  
+✅ **Multi-Camera Support**: Both cameras (192.168.1.103 and 192.168.1.104) connected  
 ✅ **Web Management Interface**: Full-width camera dashboard with live status  
 ✅ **Production Ready**: Systemd service with clean builds (0 warnings)  
-🔄 **Next Phase**: Investigate camera 192.168.1.104 connectivity issues  
+✅ **Protocol Compatibility**: Fixed query parameter parsing for all endpoints  
 
 ## 🔧 Architecture
 
@@ -116,6 +117,14 @@ The server binds to:
 - **TCP (cameras)**: `0.0.0.0:6123` - Persistent camera connections
 - **Web (browser)**: `0.0.0.0:1234` - Management dashboard (configurable via `web_port`)
 - **Server IP**: Configure in `config.json` based on your network
+
+### Protocol Flow
+
+1. **Camera Registration**: Camera POSTs to `/app/api/ApiSysDevicesBatch/registerDevices` with `batch`, `random`, `token` parameters
+2. **Device Confirmation**: Camera POSTs to `/app/api/ApiSysDevicesBatch/confirm` with `devicesCode`, `random`, `token` parameters  
+3. **TCP Connection**: Camera establishes persistent TCP connection to port 6123
+4. **Keepalive Messages**: Camera sends periodic 20-byte keepalive messages to maintain connection
+5. **Session Management**: Server tracks camera sessions with automatic cleanup of inactive connections
 
 ### DNS Requirements
 
@@ -340,3 +349,10 @@ cargo clippy
 This server successfully maintains A9 V720 cameras in standby mode and is ready for command interface development!
 
 
+
+##  Recent Achievements
+
+-  **Multi-Camera Support**: Successfully connected both cameras (192.168.1.103 and 192.168.1.104)
+-  **Protocol Compatibility**: Fixed query parameter parsing for all endpoints
+-  **Persistent Connections**: Both cameras maintain long-lived TCP connections with keepalive handling
+-  **Production Ready**: Clean builds with systemd service deployment

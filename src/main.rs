@@ -6,6 +6,7 @@ use axum::{
     middleware::{self, Next},
     http::{Method, Uri, HeaderMap},
 };
+use rand::Rng;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -81,18 +82,17 @@ async fn debug_logging_middleware(
 
 #[derive(Debug, Deserialize)]
 struct RegisterDevicesQuery {
-    _batch: String,
-    _random: String,
-    #[serde(rename = "devicesCode")]
-    _devices_code: String,
+    batch: String,
+    random: String,
+    token: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ConfirmDevicesQuery {
-    _batch: String,
-    _random: String,
     #[serde(rename = "devicesCode")]
-    _devices_code: String,
+    devices_code: String,
+    random: String,
+    token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,14 +185,13 @@ async fn register_devices(
     info!("INFO: [HTTP] Device registration request");
     info!("📥 Register Query parameters: {:?}", query);
 
+    // Generate device ID like Python server: "0800c00XXXXX"
+    let device_id = format!("0800c00{:05}", rand::random::<u32>() % 100000);
+
     let response = serde_json::json!({
         "code": 200,
-        "message": "Registration successful",
-        "data": {
-            "serverIp": "192.168.1.200",
-            "serverPort": 6123,
-            "token": "camera_registration_token"
-        }
+        "message": "OK",
+        "data": device_id
     });
 
     info!("📤 Register Response: {}", serde_json::to_string(&response).unwrap_or_default());
@@ -205,9 +204,27 @@ async fn confirm_devices(
     info!("INFO: [HTTP] Device confirmation request");
     info!("📥 Confirm Query parameters: {:?}", query);
 
+    // Generate current Unix timestamp
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+
     let response = serde_json::json!({
         "code": 200,
-        "message": "Confirmation successful"
+        "message": "OK",
+        "data": {
+            "tcpPort": 6123,
+            "uid": query.devices_code,
+            "isBind": "1",
+            "domain": "v720.naxclow.com",
+            "updateUrl": null,
+            "host": "192.168.1.200",
+            "currTime": current_time,
+            "pwd": "a9camera2024",
+            "version": null
+        }
     });
 
     info!("📤 Confirm Response: {}", serde_json::to_string(&response).unwrap_or_default());
@@ -365,6 +382,36 @@ async fn handle_tcp_message(
             info!("=== CAMERA REGISTRATION ===");
             handle_camera_registration(message, socket, addr, camera_sessions).await;
         }
+        cmd if cmd == 0 => {
+            // Keepalive message (20 bytes) - handle for any camera, registered or not
+            info!("🔄 Received keepalive from camera {}", addr);
+            
+            // Update or create session for this camera
+            let device_id = format!("camera_{}", addr.ip());
+            {
+                let mut sessions = camera_sessions.write().await;
+                if let Some(session) = sessions.get_mut(&device_id) {
+                    session.update_last_seen();
+                    info!("📋 Updated last_seen for camera: {} ({})", session.device_id, addr.ip());
+                } else {
+                    // Create session for unregistered camera
+                    let mut session = CameraSession::new(device_id.clone(), addr.ip());
+                    session.protocol_state = crate::camera_session::ProtocolState::Connected;
+                    sessions.insert(device_id.clone(), session);
+                    info!("📋 Created session for unregistered camera: {} ({})", device_id, addr.ip());
+                }
+            }
+            
+            // Send keepalive response
+            let keepalive_response = [
+                0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00
+            ];
+            if let Err(e) = socket.write_all(&keepalive_response).await {
+                error!("Failed to send keepalive response: {}", e);
+            } else {
+                info!("📤 Sent keepalive response to {}", addr);
+            }
+        }
         _ => {
             info!("Unhandled TCP message code: {} - camera will maintain connection with keepalives", message.code);
         }
@@ -388,10 +435,18 @@ async fn handle_camera_registration(
     
     {
         let mut sessions = camera_sessions.write().await;
-        let mut session = CameraSession::new(device_id.clone(), addr.ip());
-        session.protocol_state = crate::camera_session::ProtocolState::Registered;
-        session.ip_address = addr.ip();
-        sessions.insert(session_id.clone(), session);
+        // Update existing session or create new one
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.protocol_state = crate::camera_session::ProtocolState::Registered;
+            session.update_last_seen();
+            info!("📋 Updated existing session for camera: {} ({})", session_id, addr.ip());
+        } else {
+            let mut session = CameraSession::new(device_id.clone(), addr.ip());
+            session.protocol_state = crate::camera_session::ProtocolState::Registered;
+            session.ip_address = addr.ip();
+            sessions.insert(session_id.clone(), session);
+            info!("📋 Created new session for camera: {} ({})", session_id, addr.ip());
+        }
         
         info!("📋 Total cameras registered: {}", sessions.len());
         info!("📋 Active cameras: {:?}", sessions.keys().collect::<Vec<_>>());
