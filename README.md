@@ -1,336 +1,317 @@
-# A9 V720 Server
+# A9 V720 Rust Server
 
-A Rust implementation of the A9 V720 camera server protocol, designed to handle camera registration, NAT traversal, and command mode operations.
+A production-ready Rust implementation of the A9 V720 camera server protocol. This server successfully establishes persistent connections with A9 V720 cameras and maintains them in standby mode, ready for command interface implementation.
 
-## Overview
+## 🎯 Project Status: **WORKING SOLUTION**
 
-This server implements the A9 V720 protocol as documented in `fake_server.md`, providing:
+✅ **Camera Registration**: HTTP and TCP registration complete  
+✅ **Persistent Connection**: Long-lived TCP connection with keepalive handling  
+✅ **Production Ready**: Systemd service with proper deployment  
+🔄 **Next Phase**: Command interface for snapshots and streaming  
 
-- HTTP API for camera registration and server configuration
-- TCP/UDP protocol handling for camera communication
-- NAT traversal support
-- Command mode operations
-- Comprehensive logging and debugging
+## 🔧 Architecture
 
-## Architecture
+The server implements a simplified, working protocol based on real traffic analysis:
 
-The server runs three main components:
+1. **HTTP Server (Port 80)**: Camera registration and server configuration
+2. **TCP Server (Port 6123)**: Persistent camera communication with keepalive handling
 
-1. **HTTP Server (Port 80)**: Handles camera registration and server configuration requests
-2. **TCP Server (Port 6123)**: Manages camera protocol communication
-3. **UDP Server (Port 6124)**: Handles NAT traversal and data streaming
+**Note**: UDP components were removed after traffic analysis revealed they are not used by real cameras.
 
-## Protocol Flow
+## 📋 Protocol Flow (Real Implementation)
 
-### 1. HTTP Registration (Optional)
-- Camera registers via `/app/api/ApiSysDevicesBatch/registerDevices`
-- Camera confirms registration via `/app/api/ApiSysDevicesBatch/confirm`
-- Camera gets server configuration via `/app/api/ApiServer/getA9ConfCheck`
+Based on actual traffic capture and analysis, the working protocol is:
 
-### 2. TCP Connection
-- Camera connects to TCP port 6123
-- Camera sends registration message (code 100)
-- Server responds with registration confirmation (code 101)
-- Server sends NAT request (code 11)
+### 1. HTTP Registration
+1. Camera POSTs to `/app/api/ApiServer/getA9ConfCheck`
+2. Server responds with TCP connection details and credentials
 
-### 3. UDP Handshake
-- Camera connects to UDP port 6124
-- Camera sends UDP request (code 20)
-- Server responds with UDP response (code 21)
+### 2. TCP Connection & Keepalive
+1. Camera connects to TCP port 6123
+2. Camera sends registration message (code 100) 
+3. Server responds with registration confirmation (code 101) - **exactly 48 bytes**
+4. Camera maintains persistent connection
+5. Camera sends 20-byte keepalive messages periodically
+6. Server responds with 20-byte keepalive responses
 
-### 4. NAT Completion
-- Camera sends NAT response (code 12) via TCP
-- Server updates camera session state
+**Critical Discovery**: Real cameras do not use NAT/UDP protocols - they maintain a simple persistent TCP connection with periodic keepalives.
 
-### 5. Probe and Command Mode
-- Camera sends probe request (code 50)
-- Server responds with probe response (code 51)
-- Camera enters command mode
-
-## Installation
+## 🚀 Installation & Deployment
 
 ### Prerequisites
 
-- Rust (will be installed automatically if not present)
-- Debian/Ubuntu server
-- SSH access to server
+- **Debian/Ubuntu server** with network access
+- **SSH access** to the server
+- **Rust** (automatically installed during build)
 
-### Deployment
+### Quick Deployment
 
-1. **Local Setup**:
-   ```bash
-   # Make deployment script executable
-   chmod +x deploy.sh
-   
-   # Run deployment
-   ./deploy.sh
-   ```
+```bash
+# 1. Clone and enter the project
+git clone https://github.com/knightofdemons/a9-v720.git
+cd a9-v720
+git checkout rust-server-implementation
 
-2. **Manual Deployment**:
-   ```bash
-   # Transfer files to server
-   scp -i .ssh/a9_camera_key -r ./* maal@192.168.0.253:/home/maal/a9/
-   
-   # SSH to server and build
-   ssh -i .ssh/a9_camera_key maal@192.168.0.253
-   cd /home/maal/a9
-   cargo build --release
-   
-   # Install and start service
-   sudo cp a9-v720-server.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable a9-v720-server.service
-   sudo systemctl start a9-v720-server.service
-   ```
+# 2. Copy source files to server
+scp -r src/ Cargo.toml config.json a9-v720-server.service user@YOUR_SERVER:/home/user/a9/
 
-## Configuration
+# 3. SSH to server and build
+ssh user@YOUR_SERVER
+cd /home/user/a9
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Install Rust if needed
+source ~/.cargo/env
+cargo build --release
 
-### Server Configuration
+# 4. Install systemd service
+sudo cp /home/user/a9/target/release/a9-v720-server /usr/local/bin/
+sudo cp a9-v720-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable a9-v720-server.service
+sudo systemctl start a9-v720-server.service
+```
 
-The server is configured to run on:
-- **HTTP**: 0.0.0.0:80
-- **TCP**: 0.0.0.0:6123
-- **UDP**: 0.0.0.0:6124
-- **Host IP**: 192.168.1.200 (for camera connections)
+## ⚙️ Configuration
+
+### Server Configuration (`config.json`)
+
+```json
+{
+  "server_config": {
+    "server_ip": "192.168.1.200",
+    "domain": "v720.naxclow.com"
+  },
+  "http_port": 80,
+  "tcp_port": 6123
+}
+```
+
+### Network Setup
+
+The server binds to:
+- **HTTP**: `0.0.0.0:80` (all interfaces)
+- **TCP**: `0.0.0.0:6123` (all interfaces)
+- **Camera IP**: Configure in `config.json` based on your network
+
+### DNS Requirements
+
+For camera auto-discovery, configure DNS to point these domains to your server:
+- `v720.naxclow.com`
+- `p2p.v720.naxclow.com` 
+- `v720.p2p.naxclow.com`
 
 ### Environment Variables
 
-- `RUST_LOG`: Log level (default: info)
-- Set in systemd service file
+- `RUST_LOG=info` (set in systemd service)
 
-## API Endpoints
+## 📡 API Endpoints
 
-### Device Registration
+### Primary Registration Endpoint
 ```
-POST /app/api/ApiSysDevicesBatch/registerDevices?batch={batch}&random={random}&token={token}
+POST /app/api/ApiServer/getA9ConfCheck
 ```
 
-Response:
+**Query Parameters:**
+- `devices_code`: Camera device identifier  
+- `random`: Random string for request verification
+- `token`: Authentication token
+
+**Response:**
 ```json
 {
   "code": 200,
-  "message": "操作成功",
-  "data": "device_code"
-}
-```
-
-### Device Confirmation
-```
-POST /app/api/ApiSysDevicesBatch/confirm?devices_code={code}&random={random}&token={token}
-```
-
-Response:
-```json
-{
-  "code": 200,
-  "message": "操作成功",
-  "data": null
-}
-```
-
-### Server Configuration
-```
-POST /app/api/ApiServer/getA9ConfCheck?devices_code={code}&random={random}&token={token}
-```
-
-Response:
-```json
-{
-  "code": 200,
-  "message": "操作成功",
+  "message": "操作成功", 
   "data": {
-    "tcp_port": 6123,
-    "uid": "device_code",
-    "is_bind": "8",
-    "domain": "v720.naxclow.com",
-    "update_url": null,
+    "tcpPort": 6123,
+    "uid": "generated_device_id",
+    "isBind": "8",
     "host": "192.168.1.200",
-    "curr_time": "timestamp",
-    "pwd": "password",
-    "version": null
+    "currTime": "1704713847",
+    "pwd": "generated_password"
   }
 }
 ```
 
-## Protocol Messages
+**Note**: Other endpoints (`registerDevices`, `confirm`) are legacy and not used by modern cameras.
 
-### Registration (Code 100)
+## 🔗 TCP Protocol Messages
+
+### Camera Registration (Code 100)
 ```json
 {
   "code": 100,
-  "uid": "device_id",
+  "uid": "device_id", 
   "token": "password",
   "domain": "v720.naxclow.com"
 }
 ```
 
-### Registration Response (Code 101)
+### Server Registration Response (Code 101)
+**Critical**: Must be exactly 48 bytes with specific header format
 ```json
-{
-  "code": 101,
-  "status": 200
-}
+{"code": 101, "status": 200}
 ```
 
-### NAT Request (Code 11)
-```json
-{
-  "code": 11,
-  "cli_target": "uuid",
-  "cli_token": "token",
-  "cli_ip": "192.168.1.200",
-  "cli_port": 6124,
-  "cli_nat_ip": "192.168.1.200",
-  "cli_nat_port": 6124
-}
-```
+### Keepalive Messages
+- **Camera sends**: 20-byte message periodically
+- **Server responds**: 20-byte response with pattern:
+  ```
+  [0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00,
+   0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 
+   0x00, 0x00, 0x00, 0x00]
+  ```
 
-### UDP Request (Code 20)
-```json
-{
-  "code": 20
-}
-```
+**Important**: NAT/UDP protocols (codes 11, 12, 20, 21, 50, 51) are not implemented as real cameras don't use them.
 
-### UDP Response (Code 21)
-```json
-{
-  "code": 21,
-  "ip": "192.168.1.200",
-  "port": 6124
-}
-```
-
-### NAT Response (Code 12)
-```json
-{
-  "code": 12,
-  "status": 200,
-  "dev_ip": "camera_ip",
-  "dev_port": 6124,
-  "dev_nat_ip": "camera_nat_ip",
-  "dev_nat_port": 6124,
-  "cli_target": "uuid",
-  "cli_token": "token"
-}
-```
-
-### Probe Request (Code 50)
-```json
-{
-  "code": 50
-}
-```
-
-### Probe Response (Code 51)
-```json
-{
-  "code": 51,
-  "dev_target": "device_id",
-  "status": 200
-}
-```
-
-## Monitoring
+## 📊 Monitoring & Debugging
 
 ### Service Status
 ```bash
+# Check service status
 sudo systemctl status a9-v720-server.service
-```
 
-### Logs
-```bash
-# Follow logs
+# View logs in real-time
 sudo journalctl -u a9-v720-server.service -f
 
-# Recent logs
-sudo journalctl -u a9-v720-server.service --no-pager -n 50
+# View recent logs
+sudo journalctl -u a9-v720-server.service --since '10 minutes ago' --no-pager
 ```
 
-### Camera Sessions
-The server maintains active camera sessions with:
-- Device ID
-- IP address
-- Protocol state
-- NAT information
-- Last seen timestamp
+### Expected Log Output
+```
+✅ HTTP registration received from camera
+📡 TCP connection established from 192.168.1.103:xxxxx  
+📤 Sent registration response to 192.168.1.103
+🔄 Received keepalive from camera 192.168.1.103
+📤 Sent keepalive response to 192.168.1.103
+```
 
-## Testing
+### Camera Session Management
+The server tracks active cameras with:
+- Device ID and authentication status
+- IP address and connection state  
+- Last keepalive timestamp
+- Protocol state (registered/standby)
 
-### Test with Camera
-1. Configure camera to connect to 192.168.1.200
-2. Monitor server logs for connection events
-3. Verify protocol flow completion
+## 🧪 Testing & Verification
+
+### Test with Real Camera
+1. **DNS Setup**: Point `*.naxclow.com` to your server IP
+2. **Camera Setup**: Configure camera's WiFi (use original Python scripts if needed)
+3. **Monitor Logs**: Watch for registration and keepalive messages
+4. **Verify Connection**: Persistent TCP connection should be maintained
 
 ### Manual Testing
 ```bash
-# Test HTTP endpoints
-curl -X POST "http://192.168.1.200/app/api/ApiSysDevicesBatch/registerDevices?batch=TEST&random=ABC123&token=test123"
+# Test HTTP registration endpoint
+curl -X POST "http://YOUR_SERVER/app/api/ApiServer/getA9ConfCheck?devices_code=TEST&random=123&token=abc"
 
-# Test TCP connection
-nc 192.168.1.200 6123
+# Test TCP connection (basic connectivity)
+nc YOUR_SERVER 6123
 
-# Test UDP connection
-nc -u 192.168.1.200 6124
+# Check if server is listening
+sudo netstat -tlnp | grep :6123
+sudo netstat -tlnp | grep :80
 ```
 
-## Troubleshooting
+### Camera Configuration (AP Mode)
+Use the original Python scripts for initial camera setup:
+```bash
+# Connect to camera's AP mode and configure WiFi
+python3 a9_naxclow.py --set-wifi "YOUR_WIFI" "YOUR_PASSWORD"
+```
+
+## 🔧 Troubleshooting
 
 ### Common Issues
 
-1. **Service won't start**:
-   - Check logs: `sudo journalctl -u a9-v720-server.service`
-   - Verify port availability: `sudo netstat -tlnp | grep :6123`
+1. **Service Won't Start**
+   ```bash
+   # Check detailed error logs
+   sudo journalctl -u a9-v720-server.service --no-pager -n 20
+   
+   # Verify ports are available
+   sudo netstat -tlnp | grep -E ':80|:6123'
+   
+   # Check file permissions
+   ls -la /usr/local/bin/a9-v720-server
+   ```
 
-2. **Camera connection issues**:
-   - Verify firewall settings
-   - Check network connectivity
-   - Monitor server logs for protocol errors
+2. **Camera Can't Connect**
+   - ✅ **DNS**: Verify `*.naxclow.com` points to server
+   - ✅ **Network**: Camera and server on same network/reachable
+   - ✅ **Firewall**: Ports 80 and 6123 open
+   - ✅ **Logs**: Monitor server logs during camera connection attempt
 
-3. **Build errors**:
-   - Ensure Rust is installed: `rustc --version`
-   - Update dependencies: `cargo update`
+3. **Build Errors**
+   ```bash
+   # Update Rust toolchain
+   rustup update
+   
+   # Clean and rebuild
+   cargo clean
+   cargo build --release
+   ```
+
+4. **Camera Keeps Disconnecting**
+   - Check keepalive response format (must be exactly 20 bytes)
+   - Verify TCP registration response is exactly 48 bytes
+   - Monitor logs for protocol errors
 
 ### Debug Mode
-Set log level to debug:
 ```bash
+# Enable debug logging
 sudo systemctl edit a9-v720-server.service
 # Add: Environment=RUST_LOG=debug
+sudo systemctl daemon-reload
 sudo systemctl restart a9-v720-server.service
 ```
 
-## Development
+## 🛠️ Development
 
 ### Project Structure
 ```
 src/
-├── main.rs          # Main server implementation
-├── protocol.rs      # Protocol message handling
-└── camera_session.rs # Camera session management
+├── main.rs             # HTTP & TCP servers, protocol handlers
+├── protocol.rs         # Message parsing & serialization  
+├── camera_session.rs   # Session state management
+└── config.rs          # Configuration management
 ```
 
-### Building Locally
+### Key Implementation Details
+- **HTTP Server**: Axum-based, handles camera registration
+- **TCP Server**: Tokio-based, maintains persistent connections
+- **Protocol**: Custom binary format with JSON payloads
+- **Keepalive**: Precise 20-byte pattern matching Python server
+
+### Local Development
 ```bash
+# Build and test locally
 cargo build
 cargo test
-cargo run
+RUST_LOG=debug cargo run
+
+# Format and lint
+cargo fmt
+cargo clippy
 ```
 
-### Adding Features
-1. Implement new protocol codes in `protocol.rs`
-2. Add handlers in `main.rs`
-3. Update session management in `camera_session.rs`
-4. Add tests and documentation
+### Next Steps / TODO
+- [ ] **Command Interface**: Implement snapshot and streaming commands
+- [ ] **Video Streaming**: Handle JPEG frame capture and streaming  
+- [ ] **Multiple Cameras**: Support multiple concurrent camera sessions
+- [ ] **Web Interface**: Admin panel for camera management
 
-## License
+## 📚 References
 
-This project is part of the A9 camera system implementation.
+- **Protocol Documentation**: See `fake_server.md` for detailed protocol specs
+- **Original Project**: [intx82/a9-v720](https://github.com/intx82/a9-v720) (Python implementation)
+- **Camera Hardware**: A9 V720 with BL7252 MCU
 
-## Support
+## 🎯 Current Status
 
-For issues and questions, refer to:
-- `fake_server.md` for protocol documentation
-- `TODO.md` for implementation status
-- `setup-local.md` for deployment instructions
+**✅ WORKING**: Camera registration and persistent connection established  
+**🔄 NEXT**: Command interface implementation for snapshots and streaming  
+
+This server successfully maintains A9 V720 cameras in standby mode and is ready for command interface development!
 
 
