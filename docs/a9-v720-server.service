@@ -1,0 +1,28 @@
+[Unit]
+Description=A9 V720 Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/
+ExecStart=/usr/local/bin/a9-v720-server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=a9-v720-server
+
+# Environment variables
+Environment=RUST_LOG=info
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/maal/a9
+
+[Install]
+WantedBy=multi-user.target

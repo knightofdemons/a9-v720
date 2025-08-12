@@ -1,548 +1,295 @@
-use axum::{
-    extract::{Query, Request},
-    response::Json,
-    routing::post,
-    Router,
-    middleware::{self, Next},
-    http::{Method, Uri, HeaderMap},
-};
-use rand::Rng;
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::sync::RwLock;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, warn, error, debug};
-use anyhow::Result;
-use axum::response::Response;
-use axum::body::Body;
-use bytes::Bytes;
+use tokio::sync::{mpsc, Semaphore};
+use tracing::{info, error};
+use axum::{
+    routing::{get, post},
+    http::StatusCode,
+    Json, Router,
+};
+use serde_json::json;
+use crate::config::AppConfig;
+use crate::types::CameraSession;
+use crate::net::tcp::TcpRouter;
+use crate::net::udp::UdpSender;
+use crate::pipeline::WorkerPool;
 
-
-mod protocol;
-mod camera_session;
 mod config;
+mod types;
+mod net;
+mod pipeline;
+mod telemetry;
+mod protocol;
 mod web;
-use protocol::{ProtocolMessage, parse_protocol_message, serialize_registration_response, CODE_C2S_REGISTER};
-use camera_session::CameraSession;
-use config::AppConfig;
-
-type CameraSessions = Arc<RwLock<HashMap<String, CameraSession>>>;
-
-// Debug logging middleware to see raw requests and responses
-async fn debug_logging_middleware(
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Response {
-    info!("🔍 === RAW HTTP REQUEST ===");
-    info!("Method: {}", method);
-    info!("URI: {}", uri);
-    info!("Headers: {:#?}", headers);
-    
-    // Extract request body for logging
-    let (parts, body) = request.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(bytes) => {
-            if !bytes.is_empty() {
-                info!("Request Body: {}", String::from_utf8_lossy(&bytes));
-            } else {
-                info!("Request Body: (empty)");
-            }
-            bytes
-        }
-        Err(e) => {
-            error!("Failed to read request body: {}", e);
-            Bytes::new()
-        }
-    };
-    
-    // Reconstruct request with the body we just read
-    let request = Request::from_parts(parts, Body::from(body_bytes));
-    
-    // Process the request
-    let response = next.run(request).await;
-    
-    // Log response details
-    info!("🔍 === RAW HTTP RESPONSE ===");
-    info!("Status: {}", response.status());
-    info!("Response Headers: {:#?}", response.headers());
-    
-    // Note: We can't easily log response body without consuming it,
-    // but the handlers will log their JSON responses
-    
-    response
-}
-
-// Using protocol constants from protocol.rs module instead
-
-#[derive(Debug, Deserialize)]
-struct RegisterDevicesQuery {
-    batch: String,
-    random: String,
-    token: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ConfirmDevicesQuery {
-    #[serde(rename = "devicesCode")]
-    devices_code: String,
-    random: String,
-    token: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GetServerConfigQuery {
-    #[serde(rename = "devicesCode")]
-    devices_code: String,
-}
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
-        .init();
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    eprintln!("🚀 Starting A9 V720 Server...");
+    
+    // Initialize telemetry
+    eprintln!("🔧 Initializing telemetry...");
+    telemetry::init_telemetry();
 
-    info!("Starting A9 V720 Server...");
-
+    // Load configuration
+    eprintln!("🔧 Loading configuration...");
     let config = AppConfig::load("config.json")?;
-    info!("Loaded configuration: {:?}", config);
-
-    let camera_sessions: CameraSessions = Arc::new(RwLock::new(HashMap::new()));
-
-    // Start HTTP server directly on port 80 (no proxy)
-    let http_sessions = camera_sessions.clone();
+    eprintln!("⚙️ Configuration loaded successfully");
+    info!("⚙️ Configuration loaded: {:?}", config.server_config);
+    
+    // Create bounded ingress queue
+    eprintln!("🔧 Creating ingress queue...");
+    let (ingress_tx, ingress_rx) = mpsc::channel::<crate::types::RawFrame>(8192);
+    
+    // Create concurrency limiter
+    eprintln!("🔧 Creating concurrency limiter...");
+    let concurrency = Arc::new(Semaphore::new(256));
+    
+    // Create network components
+    eprintln!("🔧 Creating network components...");
+    let tcp_router = Arc::new(TcpRouter::new());
+    // Create UDP sender for responses
+    eprintln!("🔧 Creating UDP sender...");
+    let udp_sender = Arc::new(UdpSender::new(config.server_config.udp_ports.clone()).await?);
+    
+    // Create camera sessions storage
+    eprintln!("🔧 Creating camera sessions storage...");
+    let camera_sessions = Arc::new(tokio::sync::RwLock::new(
+        std::collections::HashMap::<String, CameraSession>::new()
+    ));
+    
+    // Start TCP listeners
+    eprintln!("🔧 Starting TCP listeners...");
+    let tcp_ports = vec![config.server_config.tcp_port];
+    let tcp_ingress_tx = ingress_tx.clone();
+    let tcp_router_clone = tcp_router.clone();
+    let _tcp_handle = tokio::spawn(async move {
+        eprintln!("🔧 TCP listener task started");
+        info!("🔧 TCP listener task started");
+        if let Err(e) = crate::net::tcp::run_tcp_listener(tcp_ports, tcp_ingress_tx, tcp_router_clone).await {
+            error!("TCP listener failed: {}", e);
+        }
+    });
+    
+    // Start UDP sockets
+    eprintln!("🔧 Starting UDP sockets...");
+    let udp_ports = config.server_config.udp_ports.clone();
+    let udp_ingress_tx = ingress_tx.clone();
+    let _udp_handle = tokio::spawn(async move {
+        eprintln!("🔧 UDP socket task started");
+        info!("🔧 UDP socket task started");
+        if let Err(e) = crate::net::udp::run_udp_socket(udp_ports, udp_ingress_tx).await {
+            error!("UDP socket failed: {}", e);
+        }
+    });
+    
+    // Start worker pool
+    eprintln!("🔧 Creating worker pool...");
+    let worker_pool = WorkerPool::new(
+        ingress_rx,
+        concurrency,
+        tcp_router.clone(),
+        udp_sender.clone(),
+        camera_sessions.clone(),
+    );
+    
+    // Start HTTP server for camera registration and API endpoints
+    eprintln!("🔧 Starting HTTP server...");
     let http_config = config.clone();
-    tokio::spawn(async move {
-        start_http_server(http_sessions, http_config).await;
+    let _http_handle = tokio::spawn(async move {
+        eprintln!("🔧 HTTP server task started");
+        info!("🔧 HTTP server task started");
+        if let Err(e) = start_http_server(http_config).await {
+            error!("HTTP server failed: {}", e);
+        }
     });
 
-    let tcp_sessions = camera_sessions.clone();
-    let tcp_config = config.clone();
-    tokio::spawn(async move {
-        start_tcp_server(tcp_sessions, tcp_config).await;
+    eprintln!("🔧 Starting web server...");
+    let web_port = config.server_config.web_port;
+    let web_camera_sessions = camera_sessions.clone();
+
+    let _web_handle = tokio::spawn(async move {
+        eprintln!("🔧 Web server task started");
+        info!("🔧 Web server task started");
+        if let Err(e) = crate::web::start_web_server(web_port, web_camera_sessions).await {
+            error!("Web server failed: {}", e);
+        }
     });
-
-    // Start web management server
-    let web_sessions = camera_sessions.clone();
-    let web_config = config.clone();
-    tokio::spawn(async move {
-        info!("🌐 Starting web server task...");
-        start_web_server(web_sessions, web_config).await;
-        info!("🌐 Web server task completed");
+    
+    // Start worker pool in a separate task
+    eprintln!("🔧 Starting worker pool task...");
+    let worker_handle = tokio::spawn(async move {
+        eprintln!("🔧 Worker pool task started");
+        info!("🔧 Worker pool task started");
+        worker_pool.run().await;
     });
-
-    // Start periodic session cleanup task
-    let cleanup_sessions = camera_sessions.clone();
-    tokio::spawn(async move {
-        session_cleanup_task(cleanup_sessions).await;
-    });
-
-    // UDP servers removed - real protocol uses only HTTP + TCP with keepalives
-
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down server...");
+    
+    eprintln!("🔧 All tasks started, waiting for worker pool...");
+    info!("🔧 All tasks started, waiting for worker pool...");
+    
+    // Keep the server running by waiting for the worker pool to complete
+    // The worker pool will only exit if the ingress channel is closed
+    if let Err(e) = worker_handle.await {
+        eprintln!("❌ Worker pool failed: {:?}", e);
+        error!("❌ Worker pool failed: {:?}", e);
+    }
+    
+    eprintln!("🛑 Server shutdown complete");
+    info!("🛑 Server shutdown complete");
     Ok(())
 }
 
-async fn start_http_server(_camera_sessions: CameraSessions, _config: AppConfig) {
-    let app = Router::new()
-        .route("/app/api/ApiSysDevicesBatch/registerDevices", post(register_devices))
-        .route("/app/api/ApiSysDevicesBatch/confirm", post(confirm_devices))
-        .route("/app/api/ApiServer/getA9ConfCheck", post(get_server_config))
-        .fallback(handle_fallback)
-        .layer(middleware::from_fn(debug_logging_middleware));
-
-    let addr = "0.0.0.0:80"; // Bind directly to port 80
-    info!("HTTP server listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
-
-async fn handle_fallback(uri: axum::http::Uri) -> Json<serde_json::Value> {
-    info!("INFO: [HTTP] Fallback handler for: {}", uri);
+/// Start HTTP server for camera registration and API endpoints
+async fn start_http_server(config: AppConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("🔧 Starting HTTP server setup...");
     
-    let response = serde_json::json!({
-        "code": 200,
-        "message": "NAXCLOW API Gateway",
-        "server": "v720.naxclow.com", 
-        "status": "ok",
-        "domain": "v720.naxclow.com"
-    });
+    let app = Router::new()
+        .route("/app/api/ApiSysDevicesBatch/registerDevices", post(handle_register_devices))
+        .route("/app/api/ApiSysDevicesBatch/confirm", post(handle_confirm_devices))
+        .route("/app/api/ApiServer/getA9ConfCheck", post(handle_get_config))
+        .route("/register", post(handle_camera_registration))
+        .route("/config", get(handle_config_request));
+    
+    info!("🔧 HTTP routes configured");
 
-    info!("📤 Fallback Response: {}", serde_json::to_string(&response).unwrap_or_default());
-    Json(response)
+    let addr = format!("0.0.0.0:{}", config.server_config.http_port);
+    info!("🔧 Attempting to bind HTTP server to {}", addr);
+    
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!("🌐 HTTP server listening on {}", addr);
+    
+    info!("🔧 Starting axum server...");
+    axum::serve(listener, app).await?;
+    
+    info!("🔧 HTTP server stopped");
+    Ok(())
 }
 
-async fn register_devices(
-    Query(query): Query<RegisterDevicesQuery>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    info!("INFO: [HTTP] Device registration request");
-    info!("📥 Register Query parameters: {:?}", query);
-
-    // Generate device ID like Python server: "0800c00XXXXX"
-    let device_id = format!("0800c00{:05}", rand::random::<u32>() % 100000);
-
-    let response = serde_json::json!({
+/// Handle device registration (bootstrap)
+async fn handle_register_devices(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let batch_default = "A9_X4_V12".to_string();
+    let random_default = "DEFGHI".to_string();
+    let token_default = "547d4ef98b".to_string();
+    
+    let batch = params.get("batch").unwrap_or(&batch_default);
+    let random = params.get("random").unwrap_or(&random_default);
+    let _token = params.get("token").unwrap_or(&token_default);
+    
+    info!("📝 Register devices request: batch={}, random={}", batch, random);
+    
+    // Generate device code based on batch and random
+    let device_code = format!("0800c001{}", &random[..4].to_uppercase());
+    
+    let response = json!({
         "code": 200,
-        "message": "OK",
-        "data": device_id
+        "message": "操作成功",
+        "data": device_code
     });
-
-    info!("📤 Register Response: {}", serde_json::to_string(&response).unwrap_or_default());
-    Ok(Json(response))
+    
+    (StatusCode::OK, Json(response))
 }
 
-async fn confirm_devices(
-    Query(query): Query<ConfirmDevicesQuery>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    info!("INFO: [HTTP] Device confirmation request");
-    info!("📥 Confirm Query parameters: {:?}", query);
-
-    // Generate current Unix timestamp
-    let current_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string();
-
-    let response = serde_json::json!({
+/// Handle device confirmation
+async fn handle_confirm_devices(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let devices_code_default = "0800c00128F8".to_string();
+    let random_default = "NOPQRS".to_string();
+    let token_default = "025d085049".to_string();
+    
+    let devices_code = params.get("devicesCode").unwrap_or(&devices_code_default);
+    let random = params.get("random").unwrap_or(&random_default);
+    let _token = params.get("token").unwrap_or(&token_default);
+    
+    info!("✅ Confirm devices request: devices_code={}, random={}", devices_code, random);
+    
+    let response = json!({
         "code": 200,
-        "message": "OK",
-        "data": {
-            "tcpPort": 6123,
-            "uid": query.devices_code,
-            "isBind": "1",
-            "domain": "v720.naxclow.com",
-            "updateUrl": null,
-            "host": "192.168.1.200",
-            "currTime": current_time,
-            "pwd": "a9camera2024",
-            "version": null
-        }
+        "message": "操作成功",
+        "data": null
     });
-
-    info!("📤 Confirm Response: {}", serde_json::to_string(&response).unwrap_or_default());
-    Ok(Json(response))
+    
+    (StatusCode::OK, Json(response))
 }
 
-async fn get_server_config(
-    Query(query): Query<GetServerConfigQuery>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    info!("INFO: [HTTP] Getting server configuration");
-    info!("📥 GetServerConfig Query parameters: {:?}", query);
-
-    // Generate current Unix timestamp
-    let current_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string();
-
-    let response = serde_json::json!({
+/// Handle get configuration
+async fn handle_get_config(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let devices_code_default = "0800c00128F8".to_string();
+    let random_default = "FGHIJK".to_string();
+    let token_default = "68778db973".to_string();
+    
+    let devices_code = params.get("devicesCode").unwrap_or(&devices_code_default);
+    let random = params.get("random").unwrap_or(&random_default);
+    let _token = params.get("token").unwrap_or(&token_default);
+    
+    info!("⚙️ Get config request: devices_code={}, random={}", devices_code, random);
+    
+    let response = json!({
         "code": 200,
         "message": "操作成功",
         "data": {
             "tcpPort": 6123,
-            "uid": query.devices_code,
-            "isBind": "1",
+            "uid": devices_code,
+            "isBind": "8",
             "domain": "v720.naxclow.com", 
             "updateUrl": null,
             "host": "192.168.1.200",
-            "currTime": current_time,
-            "pwd": "a9camera2024",
+            "currTime": "1676097689",
+            "pwd": "91edf41f",
             "version": null
         }
     });
-
-    info!("📤 GetServerConfig Response: {}", serde_json::to_string(&response).unwrap_or_default());
-    Ok(Json(response))
-}
-
-async fn start_tcp_server(camera_sessions: CameraSessions, config: AppConfig) {
-    let addr = config.get_tcp_bind_addr();
-    let listener = TcpListener::bind(addr.clone()).await.unwrap();
-    info!("TCP server listening on {}", addr);
-
-    loop {
-        match listener.accept().await {
-            Ok((socket, addr)) => {
-                info!("TCP connection from {}", addr);
-                let sessions = camera_sessions.clone();
-                let tcp_config = config.clone();
-                tokio::spawn(async move {
-                    handle_tcp_connection(socket, addr, sessions, tcp_config).await;
-                });
-            }
-            Err(e) => {
-                error!("TCP accept error: {}", e);
-            }
-        }
-    }
-}
-
-// UDP server function removed - not needed for real protocol
-
-async fn handle_tcp_connection(
-    mut socket: tokio::net::TcpStream,
-    addr: SocketAddr,
-    camera_sessions: CameraSessions,
-    config: AppConfig,
-) {
-    let mut buffer = [0; 4096];
     
-    loop {
-        match socket.read(&mut buffer).await {
-            Ok(0) => {
-                info!("TCP connection closed from {}", addr);
-                
-                // Clean up the session for this disconnected camera
-                {
-                    let mut sessions = camera_sessions.write().await;
-                    // Find and update session status for cameras from this IP
-                    for (device_id, session) in sessions.iter_mut() {
-                        if session.ip_address == addr.ip() {
-                            session.protocol_state = crate::camera_session::ProtocolState::Disconnected;
-                            info!("🔌 Marked camera {} ({}) as disconnected", device_id, addr.ip());
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-            Ok(n) => {
-                info!("INFO: [TCP] TCP Message Received from {}: {} bytes", addr, n);
-                let data = &buffer[..n];
-                
-                // Handle different message types based on size and content
-                if n == 20 {
-                    // This is likely a keepalive message (20 bytes as seen in capture)
-                    info!("🔄 Received keepalive from camera {}", addr);
-                    
-                    // Update the session's last_seen timestamp for any camera from this IP
-                    {
-                        let mut sessions = camera_sessions.write().await;
-                        // Find session by IP address and update last_seen
-                        for (device_id, session) in sessions.iter_mut() {
-                            if session.ip_address == addr.ip() {
-                                session.last_seen = chrono::Utc::now();
-                                info!("📋 Updated last_seen for camera: {} ({})", device_id, addr.ip());
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // Send keepalive response (20 bytes with pattern from working Python server)
-                    let response = [
-                        0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00,
-                        0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30,
-                        0x00, 0x00, 0x00, 0x00
-                    ];
-                    if let Err(e) = socket.write_all(&response).await {
-                        error!("Failed to send keepalive response: {}", e);
-                    } else {
-                        info!("📤 Sent keepalive response to {}", addr);
-                    }
-                } else {
-                    // Try to parse as protocol message (registration, etc.)
-                    match parse_protocol_message(data) {
-                        Ok(message) => {
-                            info!("INFO: [TCP] Parsing TCP Message: code={}", message.code);
-                            handle_tcp_message(message, &mut socket, addr, camera_sessions.clone(), config.clone()).await;
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse TCP message from {}: {} (might be keepalive or unknown format)", addr, e);
-                            debug!("Raw data: {}", hex::encode(data));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("TCP read error from {}: {}", addr, e);
-                break;
-            }
-        }
-    }
+    (StatusCode::OK, Json(response))
 }
 
-async fn handle_tcp_message(
-    message: ProtocolMessage,
-    socket: &mut tokio::net::TcpStream,
-    addr: SocketAddr,
-    camera_sessions: CameraSessions,
-    _config: AppConfig,
-) {
-    match message.code {
-        cmd if cmd == CODE_C2S_REGISTER => {
-            info!("=== CAMERA REGISTRATION ===");
-            handle_camera_registration(message, socket, addr, camera_sessions).await;
-        }
-        cmd if cmd == 0 => {
-            // Keepalive message (20 bytes) - handle for any camera, registered or not
-            info!("🔄 Received keepalive from camera {}", addr);
-            
-            // Update or create session for this camera
-            let device_id = format!("camera_{}", addr.ip());
-            {
-                let mut sessions = camera_sessions.write().await;
-                if let Some(session) = sessions.get_mut(&device_id) {
-                    session.update_last_seen();
-                    info!("📋 Updated last_seen for camera: {} ({})", session.device_id, addr.ip());
-                } else {
-                    // Create session for unregistered camera
-                    let mut session = CameraSession::new(device_id.clone(), addr.ip());
-                    session.protocol_state = crate::camera_session::ProtocolState::Connected;
-                    sessions.insert(device_id.clone(), session);
-                    info!("📋 Created session for unregistered camera: {} ({})", device_id, addr.ip());
-                }
-            }
-            
-            // Send keepalive response
-            let keepalive_response = [
-                0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00
-            ];
-            if let Err(e) = socket.write_all(&keepalive_response).await {
-                error!("Failed to send keepalive response: {}", e);
-            } else {
-                info!("📤 Sent keepalive response to {}", addr);
-            }
-        }
-        _ => {
-            info!("Unhandled TCP message code: {} - camera will maintain connection with keepalives", message.code);
-        }
-    }
-}
-
+/// Handle camera registration (legacy endpoint)
 async fn handle_camera_registration(
-    message: ProtocolMessage,
-    socket: &mut tokio::net::TcpStream,
-    addr: SocketAddr,
-    camera_sessions: CameraSessions,
-) {
-    info!("📥 Processing camera registration from: {}", addr);
-    info!("📥 Registration message: {}", serde_json::to_string(&message).unwrap_or_default());
+    Json(payload): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    info!("📝 Camera registration request: {:?}", payload);
     
-    // Use the device ID from the message as primary session key, fallback to IP if not provided
-    let device_id = message.uid.clone().unwrap_or_else(|| format!("camera_{}", addr.ip()));
-    let session_id = device_id.clone();
+    // Extract device information
+    let device_id = payload["device_id"].as_str().unwrap_or("unknown");
+    let ip = payload["ip"].as_str().unwrap_or("0.0.0.0");
+    let _port = payload["port"].as_u64().unwrap_or(6123) as u16;
     
-    info!("🏷️  Registering camera with ID: {} from IP: {}", session_id, addr.ip());
-    
-    {
-        let mut sessions = camera_sessions.write().await;
-        // Update existing session or create new one
-        if let Some(session) = sessions.get_mut(&session_id) {
-            session.protocol_state = crate::camera_session::ProtocolState::Registered;
-            session.update_last_seen();
-            info!("📋 Updated existing session for camera: {} ({})", session_id, addr.ip());
+    // Generate device ID based on IP (last two digits)
+    let device_id = if let Some(ip_parts) = ip.split('.').last() {
+        if let Ok(last_octet) = ip_parts.parse::<u16>() {
+            format!("cam{:02}", last_octet % 100)
         } else {
-            let mut session = CameraSession::new(device_id.clone(), addr.ip());
-            session.protocol_state = crate::camera_session::ProtocolState::Registered;
-            session.ip_address = addr.ip();
-            sessions.insert(session_id.clone(), session);
-            info!("📋 Created new session for camera: {} ({})", session_id, addr.ip());
+            device_id.to_string()
         }
-        
-        info!("📋 Total cameras registered: {}", sessions.len());
-        info!("📋 Active cameras: {:?}", sessions.keys().collect::<Vec<_>>());
-    } // Drop the lock here
-    
-    // Send registration response (code 101) - minimal response as per fake-server.md
-    let response_msg = ProtocolMessage {
-        code: 101,
-        status: Some(200),
-        ..Default::default()
+    } else {
+        device_id.to_string()
     };
     
-    let response_json = serde_json::json!({
-        "code": 101,
-        "status": 200
+    let response = json!({
+        "device_id": device_id,
+        "status": "registered",
+        "code": 200
     });
     
-    info!("📤 Sending registration response: {}", serde_json::to_string(&response_json).unwrap_or_default());
-    
-    // Send the response back to the camera using special registration headers
-    match serialize_registration_response(&response_msg) {
-        Ok(response_data) => {
-            if let Err(e) = socket.write_all(&response_data).await {
-                error!("Failed to send registration response: {}", e);
-            } else {
-                info!("✅ Registration response sent successfully");
-                info!("🔄 Camera {} now in standby mode - keeping TCP connection alive", 
-                      message.uid.as_deref().unwrap_or("unknown"));
-            }
-        }
-        Err(e) => {
-            error!("Failed to serialize registration response: {}", e);
-        }
-    }
-    
-    info!("✅ Camera registration completed for: {}", addr);
+    (StatusCode::OK, Json(response))
 }
 
-// All NAT/UDP/probe functions removed - real protocol uses simple TCP keepalive
-
-async fn start_web_server(camera_sessions: CameraSessions, config: AppConfig) {
-    info!("🌐 Creating web server state...");
-    let web_state = web::WebServerState {
-        camera_sessions,
-        config: config.clone(),
-    };
+/// Handle configuration request (legacy endpoint)
+async fn handle_config_request() -> (StatusCode, Json<serde_json::Value>) {
+    let config = AppConfig::load("config.json").unwrap_or_default();
+    let response = config.get_server_config_response("", "", "");
     
-    info!("🌐 Creating web router...");
-    let app = web::create_web_router(web_state);
+    let json_response = serde_json::json!({
+        "code": response.code,
+        "server_ip": response.server_ip,
+        "tcp_port": response.tcp_port,
+        "udp_port": response.udp_port,
+        "domain": response.domain,
+        "is_bind": response.is_bind,
+        "time_out": response.time_out,
+    });
     
-    info!("🌐 Getting web bind address...");
-    let addr = config.get_web_bind_addr();
-    
-    info!("🌐 Web management server starting on {}", addr);
-    info!("📋 Access camera management at: http://{}", addr.replace("0.0.0.0", "localhost"));
-    
-    info!("🌐 Binding to address: {}", addr);
-    match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => {
-            info!("🌐 Web server bound successfully, starting axum serve...");
-            if let Err(e) = axum::serve(listener, app).await {
-                error!("🌐 Web server failed: {}", e);
-            }
-        }
-        Err(e) => {
-            error!("🌐 Failed to bind web server to {}: {}", addr, e);
-        }
-    }
-    info!("🌐 Web server function ending");
-}
-
-async fn session_cleanup_task(camera_sessions: CameraSessions) {
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Run every minute
-    
-    loop {
-        interval.tick().await;
-        
-        let mut sessions_to_remove = Vec::new();
-        {
-            let sessions = camera_sessions.read().await;
-            for (device_id, session) in sessions.iter() {
-                // Remove sessions that haven't been seen for more than 10 minutes
-                if !session.is_active() {
-                    sessions_to_remove.push(device_id.clone());
-                }
-            }
-        }
-        
-        if !sessions_to_remove.is_empty() {
-            let mut sessions = camera_sessions.write().await;
-            for device_id in sessions_to_remove {
-                if let Some(removed_session) = sessions.remove(&device_id) {
-                    info!("🧹 Cleaned up inactive camera session: {} ({})", device_id, removed_session.ip_address);
-                }
-            }
-            info!("📊 Active camera sessions: {}", sessions.len());
-        }
-    }
+    (StatusCode::OK, Json(json_response))
 }
