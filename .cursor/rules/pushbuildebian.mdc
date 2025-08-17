@@ -1,0 +1,5 @@
+---
+description: Debianserver
+globs: only push and build on the debianserver on 192.168.0.253 through ssh
+alwaysApply: false
+---

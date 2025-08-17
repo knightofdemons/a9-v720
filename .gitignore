@@ -1,27 +1,34 @@
-# Exclude configuration and documentation files with sensitive information
-TODO.md
-setup-local.md
+# Archive directories
+archive/
+
+# SSH keys and configuration
+.ssh/
+
+# Documentation and analysis files
+docs/
+
+# Network capture files
+*.pcap
+*.pcapng
+captures/
 
 # Rust build artifacts
-/target/
+target/
 Cargo.lock
 
 # IDE files
 .vscode/
 .idea/
-.cursor/
-
-# SSH keys and sensitive credentials
-.ssh/
+*.swp
+*.swo
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Local test files
-*.tmp
+# Log files
 *.log
-*.pcap
 
-# Archive directories (keep local backups only)
-archive/
+# Environment files
+.env
+.env.local

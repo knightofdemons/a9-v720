@@ -1,20 +1,19 @@
 {
-  "server_config": {
-    "server_ip": "192.168.1.200",
-    "http_port": 80,
-    "web_port": 1234,
-    "tcp_port": 6123,
-    "udp_port": 6123,
-    "domain": "v720.naxclow.com",
-    "is_bind": "1",
-    "default_status": 200,
-    "default_timeout": 30,
-    "ingress_capacity": 8192,
-    "max_inflight": 256,
-    "worker_threads": 8,
-    "max_frame_length": 65536,
-    "tcp_ports": [6123, 53221, 41234],
-    "udp_ports": [6123, 53221, 41234]
-  }
+      "server_ip": "192.168.1.99",
+  "domain": "v720.naxclow.com",
+  "client_target": "00112233445566778899aabbccddeeff",
+  "client_token": "deadc0de",
+  "server_token": "deadbeef",
+  
+  "tcp_registration_port": 80,
+  "tcp_protocol_port": 6123,
+  "udp_protocol_port": 6123,
+  "udp_stream_port_1": 53221,
+  "udp_stream_port_2": 41234,
+  "web_port": 1234,
+  
+  "max_retries": 3,
+  "retry_timeout_ms": 5000,
+  "health_check_interval_ms": 30000,
+  "retransmission_interval_ms": 100
 }
-

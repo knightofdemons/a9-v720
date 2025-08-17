@@ -1,0 +1,29 @@
+[Unit]
+Description=A9 V720 Camera Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=maal
+Group=maal
+WorkingDirectory=/home/maal/a9-v720-server
+ExecStart=/home/maal/a9-v720-server/target/release/a9-v720-server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=a9-v720-server
+
+# Environment variables
+Environment=RUST_LOG=info
+Environment=PATH=/home/maal/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/maal/a9-v720-server
+
+[Install]
+WantedBy=multi-user.target

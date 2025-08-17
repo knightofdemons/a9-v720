@@ -1,127 +1,68 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
 use anyhow::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
-    // Network configuration for camera communication
-    pub server_ip: String,
-    pub http_port: u16,  // Port for camera HTTP requests (default: 80)
-    pub web_port: u16,   // Port for camera web server (default: 8080)
-    pub tcp_port: u16,   // Port for camera TCP connections (default: 6123)
-    pub udp_port: u16,   // Port for camera UDP connections (default: 6123)
-    
-    // Domain configuration
-    pub domain: String,
-
-    // Protocol configuration
-    pub is_bind: String,
-
-    // Default values for responses
-    pub default_status: u16,
-    pub default_timeout: u16,
-    
-    // New architecture configuration
-    pub ingress_capacity: usize,    // Bounded queue size for ingress frames
-    pub max_inflight: usize,        // Maximum concurrent message processing
-    pub worker_threads: usize,      // Number of worker threads
-    pub max_frame_length: usize,    // Maximum frame size
-    pub tcp_ports: Vec<u16>,        // Multiple TCP ports to listen on
-    pub udp_ports: Vec<u16>,        // Multiple UDP ports to listen on
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            server_ip: "192.168.1.200".to_string(),
-            http_port: 80,      // Camera HTTP requests
-            web_port: 1234,    // Camera web server
-            tcp_port: 6123,     // Camera TCP connections  
-            udp_port: 6123,     // Camera UDP connections
-            domain: "v720.naxclow.com".to_string(),
-            is_bind: "1".to_string(),
-            default_status: 200,
-            default_timeout: 30,
-            // New architecture defaults
-            ingress_capacity: 8192,
-            max_inflight: 256,
-            worker_threads: 8,
-            max_frame_length: 65536,
-            tcp_ports: vec![6123, 53221, 41234],
-            udp_ports: vec![6123, 53221, 41234],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfigResponse {
-    pub code: i32,
-    pub server_ip: String,
-    pub tcp_port: i32,
-    pub udp_port: i32,
-    pub domain: String,
-    pub is_bind: String,
-    pub time_out: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub server_config: ServerConfig,
-}
-
-impl AppConfig {
-    pub fn load(path: &str) -> Result<Self> {
-        if Path::new(path).exists() {
-            let content = fs::read_to_string(path)?;
-            let config: AppConfig = serde_json::from_str(&content)?;
-            Ok(config)
-        } else {
-            let config = Self::default();
-            config.save(path)?;
-            Ok(config)
-        }
-    }
-
-    pub fn save(&self, path: &str) -> Result<()> {
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn get_http_bind_addr(&self) -> String {
-        format!("0.0.0.0:{}", self.server_config.http_port)
-    }
-
-    #[allow(dead_code)]
-    pub fn get_tcp_bind_addr(&self) -> String {
-        format!("0.0.0.0:{}", self.server_config.tcp_port)
-    }
-
-    #[allow(dead_code)]
-    pub fn get_udp_bind_addr(&self) -> String {
-        format!("0.0.0.0:{}", self.server_config.udp_port)
-    }
-
-    #[allow(dead_code)]
-    pub fn get_server_config_response(&self, _uid: &str, _password: &str, _current_time: &str) -> ServerConfigResponse {
-        ServerConfigResponse {
-            code: self.server_config.default_status as i32,
-            server_ip: self.server_config.server_ip.clone(),
-            tcp_port: self.server_config.tcp_port as i32,
-            udp_port: self.server_config.udp_port as i32,
-            domain: self.server_config.domain.clone(),
-            is_bind: self.server_config.is_bind.clone(),
-            time_out: self.server_config.default_timeout as i32,
-        }
-    }
+    pub server_ip: String,
+    pub domain: String,
+    pub client_target: String,
+    pub client_token: String,
+    pub server_token: String,
+    
+    pub tcp_registration_port: u16,
+    pub tcp_protocol_port: u16,
+    pub udp_protocol_port: u16,
+    pub udp_stream_port_1: u16,
+    pub udp_stream_port_2: u16,
+    pub web_port: u16,
+    
+    pub max_retries: u32,
+    pub retry_timeout_ms: u64,
+    pub health_check_interval_ms: u64,
+    pub retransmission_interval_ms: u64,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            server_config: ServerConfig::default(),
+            server_ip: "192.168.1.99".to_string(),
+            domain: "v720.naxclow.com".to_string(),
+            client_target: "00112233445566778899aabbccddeeff".to_string(),
+            client_token: "deadc0de".to_string(),
+            server_token: "deadbeef".to_string(),
+            
+            tcp_registration_port: 80,
+            tcp_protocol_port: 6123,
+            udp_protocol_port: 6123,
+            udp_stream_port_1: 53221,
+            udp_stream_port_2: 41234,
+            web_port: 8080,
+            
+            max_retries: 3,
+            retry_timeout_ms: 5000,
+            health_check_interval_ms: 30000,
+            retransmission_interval_ms: 100,
         }
+    }
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self> {
+        // Try to load from config.json first
+        if let Ok(config_str) = fs::read_to_string("config.json") {
+            let config: AppConfig = serde_json::from_str(&config_str)?;
+            return Ok(config);
+        }
+        
+        // Fall back to default configuration
+        tracing::warn!("config.json not found, using default configuration");
+        Ok(AppConfig::default())
+    }
+    
+    pub fn save(&self) -> Result<()> {
+        let config_str = serde_json::to_string_pretty(self)?;
+        fs::write("config.json", config_str)?;
+        Ok(())
     }
 }
