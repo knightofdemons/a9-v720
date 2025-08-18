@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use std::net::SocketAddr;
 
 /// Camera protocol states
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -330,16 +331,19 @@ pub struct ViewerInfo {
 /// Camera connection information
 #[derive(Debug)]
 pub struct CameraConnection {
+    pub device_id: String,
     pub ip: IpAddr,
-    pub device_id: Option<String>,
+    pub addr: SocketAddr,
     pub state: ProtocolState,
-    pub tcp_conn: Option<Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>>,
+    pub protocol_state: ProtocolState,
+    pub tcp_conn: Option<tokio::net::TcpStream>,
     pub stream_buffer: StreamBuffer,
     pub received_packages: Vec<u32>,
     pub last_retransmission_time: chrono::DateTime<chrono::Utc>,
     pub udp_ports: HashMap<u16, u16>, // port -> dummy value (just for tracking)
     pub viewers: HashMap<String, ViewerInfo>,
     pub last_heartbeat: chrono::DateTime<chrono::Utc>,
+    pub last_keepalive: chrono::DateTime<chrono::Utc>,
     pub retry_count: u32,
     pub device_info: Option<DeviceInfo>,
     pub nat_ports: Vec<u16>,
@@ -349,6 +353,10 @@ pub struct CameraConnection {
     pub probe_state: ProbeState, // Track Code 50/51 probe exchange
     pub first_retransmission_sent: bool, // Track if first empty retransmission was sent
     pub retransmission_bucket: Vec<u32>, // Bucket to collect package IDs between end frames
+    pub token: Option<String>,
+    pub camera_nat_port: Option<u16>,
+    pub code51_count: u32,
+    pub pending_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,27 +367,34 @@ pub enum ProbeState {
 }
 
 impl CameraConnection {
-    pub fn new(ip: IpAddr) -> Self {
+    pub fn new(device_id: String, ip: IpAddr, addr: SocketAddr) -> Self {
         Self {
+            device_id,
             ip,
-            device_id: None,
+            addr,
             state: ProtocolState::Disconnected,
+            protocol_state: ProtocolState::Disconnected,
             tcp_conn: None,
-            udp_ports: HashMap::new(),
             stream_buffer: StreamBuffer::new(100), // Keep 100 frames
+            received_packages: Vec::new(),
+            last_retransmission_time: chrono::Utc::now(),
+            udp_ports: HashMap::new(),
             viewers: HashMap::new(),
             last_heartbeat: chrono::Utc::now(),
+            last_keepalive: chrono::Utc::now(),
             retry_count: 0,
             device_info: None,
             nat_ports: Vec::new(),
             device_info_ack_sent: false,
-            received_packages: Vec::new(),
-            last_retransmission_time: chrono::Utc::now(),
             random_video_socket: None,
             random_video_port: None,
             probe_state: ProbeState::NotStarted,
             first_retransmission_sent: false,
             retransmission_bucket: Vec::new(),
+            token: None,
+            camera_nat_port: None,
+            code51_count: 0,
+            pending_command: None,
         }
     }
 
@@ -412,6 +427,25 @@ impl CameraConnection {
 
     pub fn is_connected(&self) -> bool {
         self.state == ProtocolState::Idle || self.state == ProtocolState::Streaming
+    }
+
+    pub fn is_connection_healthy(&self) -> bool {
+        let now = chrono::Utc::now();
+        let duration = now.signed_duration_since(self.last_keepalive);
+        duration.num_seconds() < 30 // Consider unhealthy after 30 seconds without keepalive
+    }
+
+    pub fn update_keepalive(&mut self) {
+        self.last_keepalive = chrono::Utc::now();
+    }
+
+    pub fn add_video_frame(&mut self, data: &[u8]) {
+        // Add video frame to stream buffer
+        self.stream_buffer.add_complete_frame(data.to_vec());
+    }
+
+    pub fn take_pending_command(&mut self) -> Option<String> {
+        self.pending_command.take()
     }
 
     pub fn add_received_package(&mut self, pkg_id: u32) {
@@ -470,7 +504,9 @@ impl CameraManager {
         if let Some(camera) = self.cameras.get(&ip) {
             camera.clone()
         } else {
-            let camera = Arc::new(RwLock::new(CameraConnection::new(ip)));
+            let device_id = format!("cam{}", ip.to_string().split('.').last().unwrap_or("0"));
+            let addr = SocketAddr::new(ip, 6123);
+            let camera = Arc::new(RwLock::new(CameraConnection::new(device_id, ip, addr)));
             self.cameras.insert(ip, camera.clone());
             camera
         }
